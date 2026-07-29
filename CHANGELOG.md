@@ -4,6 +4,56 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.6.1 — `lean_olean_archive` builds on linux, and is byte-reproducible
+
+`lean_olean_archive` tarred the import root directly with `tar -czhf`. The
+import root is a symlink farm into bazel-out, so `-h` reads THROUGH the links
+while bazel may still be materialising them, and GNU tar treats that as fatal:
+
+    tar: ./Aion/Db/EntityType/EntityTypeFieldPredicates.olean:
+         file changed as we read it
+
+**GNU tar exits 1 on that warning; BSD tar does not.** The rule therefore worked
+on macOS and failed on every linux/RBE build — invisible to local verification,
+and it took an RBE worker log to see it (observed on aion/sql, green on the same
+commit on darwin). Downstream this was not a cosmetic failure: the olean publish
+job was *removed* from aion's CI because of it, which is what has been blocking
+the cross-repo compiled-olean seam this rule exists to provide.
+
+The rule now stages the import root into a private scratch dir with `cp -RL`,
+then tars that without `-h`. `tar` reads a tree nothing else is writing, and `cp`
+does not fail on concurrent mtime churn the way `tar` does, so the race is
+removed rather than narrowed.
+
+While here: the tarball ships as a release asset that consumers pin by sha256,
+so it is now **reproducible**. Three things had to be pinned, not one — entry
+order (an `LC_ALL=C`-sorted list via `-T -`, not readdir order), per-entry
+mtimes (`touch` to a fixed date, because `cp` stamps the staged copies with the
+current time), and the gzip header timestamp (`gzip -n`). `gzip -n` on its own
+is not enough and the archive stayed non-reproducible with only it; that was
+caught by building the same tree twice a second apart and diffing.
+
+uid/gid/uname/gname are still taken from the builder, so this is reproducible
+for a given builder — a CI runner rebuilding the same commit gets identical
+bytes — not across accounts.
+
+**And CI now actually runs the rule.** `//examples/olean_roundtrip` has covered
+`lean_olean_archive` since 0.4.0, but nothing ever executed it: the fast gate is
+`//docs/...` only, and the two Lean jobs go through elan/lake rather than the
+Bazel rule. The rule was broken on linux for a week behind six green checks, none
+of which touched it. There is now an `olean_archive` PR gate on ubuntu —
+ubuntu-only on purpose, since the failure mode is GNU tar exiting 1 where BSD tar
+warns, so macOS cannot fail and re-proving it there buys nothing.
+
+The round-trip assertion was also weaker than it looked: it grepped the tar
+listing for the olean's path. Drop the `-L` from `cp -RL` and the archive still
+contains an entry at that path — a dangling symlink into bazel-out, useless to
+consumers — and the grep passed. It now asserts the entry is a regular file with
+non-zero bytes, verified by building both the correct and the non-dereferenced
+archive and confirming the old check accepted the broken one.
+
+No API change; `out` and the produced tarball layout are unchanged.
+
 ## 0.6.0 — the imports manifest is opt-in; `lake_workspace` stops building a CLI it never runs
 
 Every `lake_workspace` materialization compiled the RulesLean `oleanImports` CLI

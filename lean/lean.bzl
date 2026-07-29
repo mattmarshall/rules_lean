@@ -755,15 +755,51 @@ def _lean_olean_archive_impl(ctx):
 
     out = ctx.actions.declare_file(ctx.attr.out if ctx.attr.out else (ctx.label.name + ".tar.gz"))
 
-    # `tar -C <root> .` packs the import-root contents at the tarball top.
-    # -h dereferences: in the build action the import-root is a symlink farm into
-    # bazel-out, so without -h the archive would hold dangling links to build-time
-    # paths instead of the real .olean bytes. Portable across GNU and bsd tar
-    # (macOS); entries are gzip-compressed.
+    # STAGE, then tar the stage — do NOT tar the import root directly.
+    #
+    # The import root is a symlink farm into bazel-out, so the archive has to
+    # dereference to capture real .olean bytes rather than dangling build-time
+    # paths. Doing that with `tar -czhf <root>` reads THROUGH the links while
+    # bazel may still be materialising them, and GNU tar treats that as fatal:
+    #
+    #   tar: ./Aion/Db/EntityType/EntityTypeFieldPredicates.olean:
+    #        file changed as we read it
+    #
+    # GNU tar exits 1 on that warning; BSD tar (macOS) does not — so the bug is
+    # invisible on a Mac and breaks every linux/RBE build. Observed on aion/sql
+    # RBE workers, green on the same commit locally on darwin.
+    #
+    # `cp -RL` resolves every link once into a private scratch dir; `tar` then
+    # reads a tree nothing else is writing, and needs no `-h`. cp does not fail
+    # on concurrent mtime churn the way tar does, so the race cannot resurface.
+    # `mktemp -d` honours TMPDIR, which bazel points at a writable per-action
+    # directory. Both steps are portable across GNU and BSD userland.
+    #
+    # Determinism: the tarball ships as a release asset that consumers pin by
+    # sha256, so the same olean tree must give the same bytes. Three sources of
+    # nondeterminism, all removed:
+    #   * entry ORDER would otherwise follow readdir — hence the LC_ALL=C-sorted
+    #     file list fed via `-T -` with `--no-recursion`;
+    #   * entry MTIMES, because `cp` stamps the copies with the current time —
+    #     hence the `touch` to a fixed date. `gzip -n` alone does NOT cover this;
+    #     it only clears the timestamp in the gzip header, not tar's per-entry
+    #     ones, and the archive stayed non-reproducible until this was added;
+    #   * the gzip HEADER timestamp — hence `gzip -n`.
+    # `-T`/`--no-recursion`, `-n` and `touch -t` are GNU/BSD-portable.
+    #
+    # Not normalized: uid/gid/uname/gname, which tar takes from the builder.
+    # Reproducible for a given builder (so a CI runner rebuilding the same
+    # commit gets identical bytes); not across accounts.
     ctx.actions.run_shell(
         outputs = [out],
         inputs = depset(own_files),
-        command = 'tar -czhf "{out}" -C "{root}" .'.format(out = out.path, root = root),
+        command = """set -eu
+stage="$(mktemp -d)"
+trap 'rm -rf "$stage"' EXIT
+cp -RL "{root}/." "$stage/"
+find "$stage" -exec touch -t 200001010000 {{}} +
+(cd "$stage" && find . -print | LC_ALL=C sort | tar -cf - --no-recursion -T -) | gzip -n > "{out}"
+""".format(out = out.path, root = root),
         mnemonic = "LeanOleanArchive",
         progress_message = "Lean olean archive %s" % ctx.label.name,
     )

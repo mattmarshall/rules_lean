@@ -98,5 +98,16 @@ jobs:
         run: |
           # Sanity: each lean_exe target's --help-style empty invocation
           # exits with the documented 2 (usage) rather than crashing.
-          lake exe oleanImports 2>/dev/null; test $? -eq 2
-          lake exe leanClosure   2>/dev/null; test $? -eq 2
+          #
+          # This was previously written `cmd 2>/dev/null; test $? -eq 2`, which
+          # can NEVER pass. `run:` defaults to `bash -e {0}`, and exiting 2 is
+          # the PASS condition here — so `-e` aborted the step on the CLI's own
+          # exit before `test` ever ran, failing the job with that same 2. The
+          # step had never gone green.
+          #
+          # `cmd || rc=$?` is the fix: a command whose failure is being tested
+          # is exempt from `-e`, so the status reaches `test` intact.
+          rc=0; lake exe oleanImports 2>/dev/null || rc=$?
+          test "$rc" -eq 2
+          rc=0; lake exe leanClosure 2>/dev/null || rc=$?
+          test "$rc" -eq 2

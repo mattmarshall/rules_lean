@@ -4,6 +4,70 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.6.0 — the imports manifest is opt-in; `lake_workspace` stops building a CLI it never runs
+
+Every `lake_workspace` materialization compiled the RulesLean `oleanImports` CLI
+with the consumer's Lean toolchain, unconditionally. Two things were wrong with
+that, and both are now fixed.
+
+**The dep-free path built the CLI and provably never invoked it.** When the
+lakefile declares no `require`s, `_lake_workspace_impl` short-circuits — and the
+manifest generator it calls with an empty package list writes `""` and returns
+before it would reach the binary. So the compile was pure cost. Observed on one
+darwin output base, three times over: `ruleslean_lib/` at 149 MB next to a
+`lake_imports_manifest.tsv` of **0 bytes**, in the `rules_lang`, `rules_postgres`
+and `rules_spec` lake workspaces.
+
+**And even on the dep-ful path, nothing reads the manifest.** It is an
+introspection aid — "what does olean X import?" — not an input to compiling Lean.
+So it is now behind `emit_imports_manifest`, default `False`:
+
+```python
+lake.workspace(
+    name = "lake_deps",
+    emit_imports_manifest = True,   # only if you actually consume the TSV
+    ...
+)
+```
+
+`@<ws>//:lake_imports_manifest` and the `.tsv` are still declared either way —
+empty when off — so no consumer BUILD file has to branch on the attr. Turning it
+back on restores the previous contents exactly.
+
+**`_build_ruleslean_library`'s timeout goes 600s → 3600s, and its docstring stops
+understating the cost.** It claimed "~3-5s cold". Measured here on darwin/arm64,
+Lean v4.30.0-rc2, fresh output base, uncontended: **~9s wall** — but a **149 MB**
+`.lake/build/`, per `lake_workspace`. The clock was roughly right; the footprint
+is the cost, and it is duplicated across every workspace in an output base. A
+separate investigation measured 130.9s / 237.6s / 497.5s for the same step on
+darwin, which was **not reproduced here** — so the wall time is
+environment-dependent somewhere between ~9s and several minutes, and nobody has
+measured it on linux. At ~9s the 600s cap is nowhere near binding; the raise is
+insurance for the slow end (a repository-rule timeout is a hard analysis failure,
+not a slow build), on a step that now rarely runs at all.
+
+Measured end to end, on a throwaway consumer that `bazel_dep`s on a module with a
+dep-free lake workspace and builds one `cc_library` (darwin/arm64):
+
+  before   2.6 GB of `external/`  — 2.5 GB Lean toolchain + 149 MB `ruleslean_lib/`
+  after    2.3 MB of `external/`  — no Lean repos materialized at all
+
+with, in the before case, a `lake_imports_manifest.tsv` of **0 bytes** sitting
+next to the 149 MB it cost to produce.
+
+## 0.5.5 — resolve deps from the pinned manifest, never `lake update`
+
+Backfilled entry; 0.5.5 shipped to the registry without one.
+
+`_lake_workspace_impl` materialized deps with `lake update`, which regenerates the
+lake-manifest.json that was just pinned *and* fires every dep's `post_update`
+hook. mathlib's hook runs a hardcoded, unfiltered `lake exe cache get`, pulling
+all ~7900 oleans before 0.5.4's tree-shaken `cache_roots` fetch got a say — which
+left `cache_roots` shipped-but-inert in 0.5.4. Now a non-mutating `lake env true`
+resolves from the committed manifest, no hook fires, and `cache_roots` actually
+takes effect. Verify by BYTES on disk, not by the "Already decompressed N" log,
+which reports the tree-shaken count either way.
+
 ## 0.5.4 — tree-shake mathlib's olean download (`cache_roots`)
 
 `lake.workspace(cache_roots = [...])` restricts mathlib's `lake exe cache get`

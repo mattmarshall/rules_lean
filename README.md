@@ -7,7 +7,7 @@ each consumer to self-host a multi-gigabyte olean tarball.
 - **rules**: `lean_test`, `lean_emit`, `lean_prebuilt_library`, `lean_toolchain` — see [docs/lean.md](docs/lean.md).
 - **lake integration**: `lake_workspace` repository rule + `lake` module extension — see [docs/lake.md](docs/lake.md).
 - **RulesLean Lean library** (`lean/lib/`): structured introspection of `.olean` files (`RulesLean.Olean`) and Lake workspaces (`RulesLean.Workspace`). Internal helpers under `RulesLean.Internal.*` are unstable; treat them as opt-in and expect API churn between releases. See [lean/lib/RulesLean.lean](lean/lib/RulesLean.lean) for the entry-point doc.
-- **lake_imports_manifest** target: when `lake_workspace` materializes, it builds the RulesLean library + `oleanImports` CLI and runs it over every olean in the workspace. Result lands at `@<your-lake-deps>//:lake_imports_manifest` — a TSV of `<path>\t<imported-module>` edges (~5MB / 42k edges for full mathlib). Downstream consumers can use it for import-graph analysis, tree-shaking, dead-code detection.
+- **lake_imports_manifest** target (opt-in): set `emit_imports_manifest = True` on your `lake.workspace` and `lake_workspace` builds the RulesLean library + `oleanImports` CLI and runs it over every olean in the workspace. Result lands at `@<your-lake-deps>//:lake_imports_manifest` — a TSV of `<path>\t<imported-module>` edges (~5MB / 42k edges for full mathlib), for import-graph analysis, tree-shaking, dead-code detection. **Off by default since 0.6.0**: compiling the CLI leaves a ~149MB `.lake/build/` behind (measured, darwin/arm64) in every `lake_workspace`, whether or not anything reads the manifest. The target still exists when off — it is just empty.
 
 ## Install
 

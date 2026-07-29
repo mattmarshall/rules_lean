@@ -39,6 +39,37 @@ jobs:
           chmod +x /usr/local/bin/buildifier
       - run: buildifier --mode=check --lint=warn -r .
 
+  # `lean_olean_archive` on LINUX specifically.
+  #
+  # This job exists because the rule was broken on linux for a week and CI could
+  # not see it. `//examples/olean_roundtrip` has covered the rule since 0.4.0,
+  # but nothing ever ran it: the fast gate is `//docs/...` only, and the two
+  # Lean jobs go through elan/lake rather than the Bazel rule. Six green checks,
+  # none of which touched the rule.
+  #
+  # Linux is the point, not incidental. The failure mode is GNU tar exiting 1 on
+  # `file changed as we read it` where BSD tar only warns — so the bug is
+  # invisible on macOS by construction, and a macOS-green run is not evidence.
+  # ubuntu-only is deliberate: doubling the matrix would only re-prove the
+  # platform that cannot fail.
+  #
+  # A PR gate, unlike lake_integration below: this is cheap (a two-file Lean
+  # library, no Mathlib, no Batteries — the Lean toolchain download dominates
+  # and setup-bazel caches it), and catching it post-merge is exactly what
+  # already happened.
+  olean_archive:
+    name: lean_olean_archive round-trip (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.10.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-olean
+          repository-cache: true
+      - run: bazel test //examples/olean_roundtrip/... --test_output=errors
+
   # End-to-end smoke: actually runs `lake_workspace` against a Batteries-only
   # Lake workspace (no Mathlib → no multi-GB Reservoir cache download), then
   # typechecks a Lean file that imports Batteries. This exercises the full

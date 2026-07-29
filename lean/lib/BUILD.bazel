@@ -14,12 +14,12 @@ exports_files(
     ],
 )
 
+# `RulesLean.lean` is listed outside the glob deliberately: it is the library's
+# root module and is always present, so a constant glob pattern would only serve
+# to make its absence silent. Listing it means a rename fails the build loudly.
 filegroup(
     name = "library_sources",
-    srcs = glob([
-        "RulesLean.lean",
-        "RulesLean/**/*.lean",
-    ]),
+    srcs = ["RulesLean.lean"] + glob(["RulesLean/**/*.lean"]),
 )
 
 filegroup(

@@ -101,10 +101,12 @@ def _collect_dep_lean_info(deps):
     return depset(transitive = markers), depset(transitive = files)
 
 def _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops):
-    """Topo-compile manifest lines for deps: oleans sharing one of the
-    consumer's top-level namespaces are `stage`d into the compile root (Lean
-    won't fall through LEAN_PATH roots for a namespace); disjoint deps go on
-    `leanpath` (no copy)."""
+    """Build the topo-compile manifest lines for a target's prebuilt olean deps.
+
+    Oleans sharing one of the consumer's top-level namespaces are `stage`d into
+    the compile root (Lean won't fall through LEAN_PATH roots for a namespace);
+    disjoint deps go on `leanpath` (no copy).
+    """
     lines = []
     leanpath = {}
     for f in dep_files.to_list():
@@ -404,6 +406,9 @@ def lean_regen_test(name, srcs, entry, expected, out = None, deps = None, data =
         `<name>_emit.out`).
       deps: optional list of `LeanInfo`-providing deps for prebuilt
         olean closures (passed through to `lean_emit`).
+      data: optional runtime files the entry point reads while it
+        executes (passed through to `lean_emit`). Paths resolve
+        relative to the emit action's working directory.
       tags: optional tags propagated to the generated `diff_test`
         target only.
     """

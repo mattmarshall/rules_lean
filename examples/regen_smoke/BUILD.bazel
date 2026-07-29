@@ -21,8 +21,8 @@ lean_regen_test(
 lean_regen_test(
     name = "regen_smoke_data",
     srcs = ["EchoFixture.lean"],
-    entry = "EchoFixture.lean",
     data = ["fixture.txt"],
+    entry = "EchoFixture.lean",
     expected = "fixture.txt",
 )
 

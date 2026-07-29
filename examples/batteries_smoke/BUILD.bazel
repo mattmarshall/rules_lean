@@ -1,5 +1,5 @@
-load("@rules_lean//lean:lean.bzl", "lean_test")
 load("@lake_deps_smoke//:packages.bzl", "LAKE_PACKAGES")
+load("@rules_lean//lean:lean.bzl", "lean_test")
 
 package(default_visibility = ["//visibility:public"])
 

@@ -309,7 +309,7 @@ Assert a committed file matches the current `lean_emit` output.
 | <a id="lean_regen_test-expected"></a>expected |  Bazel label of the committed file the lean_emit output is diffed against.   |  none |
 | <a id="lean_regen_test-out"></a>out |  optional filename for the emitted artifact (defaults to `<name>_emit.out`).   |  `None` |
 | <a id="lean_regen_test-deps"></a>deps |  optional list of `LeanInfo`-providing deps for prebuilt olean closures (passed through to `lean_emit`).   |  `None` |
-| <a id="lean_regen_test-data"></a>data |  <p align="center"> - </p>   |  `None` |
+| <a id="lean_regen_test-data"></a>data |  optional runtime files the entry point reads while it executes (passed through to `lean_emit`). Paths resolve relative to the emit action's working directory.   |  `None` |
 | <a id="lean_regen_test-tags"></a>tags |  optional tags propagated to the generated `diff_test` target only.   |  `None` |
 
 

@@ -266,6 +266,12 @@ def _generate_build_file(rctx, packages):
     # oleanImports CLI. Consumed by downstream tooling that wants to ask
     # "what does .olean X import?" without parsing oleans themselves.
     # See //lean/lib/RulesLean/Olean.lean for the library API.
+    #
+    # Declared UNCONDITIONALLY, even though the manifest is opt-in
+    # (`emit_imports_manifest`) — the .tsv is always written, empty when off. A
+    # consumer's BUILD file therefore never has to branch on the attr, and
+    # flipping it changes only the file's contents, never whether the label
+    # resolves.
     lines += [
         "filegroup(",
         '    name = "lake_imports_manifest",',
@@ -386,7 +392,11 @@ def _lake_workspace_impl(rctx):
         # That's valid — there's nothing to fetch or source-build. Emit just the
         # toolchain (+ an empty imports manifest / dep BUILD) and return. The
         # registered `:lean_toolchain_def` is all a dep-free consumer needs.
-        _build_ruleslean_library(rctx, env)
+        #
+        # Nothing here compiles the RulesLean CLI: with no packages there are no
+        # oleans to enumerate, so the manifest is empty by construction and the
+        # CLI would never be invoked. Building it anyway cost every dep-free
+        # workspace a ~149 MB Lake build whose output was provably unread.
         _generate_imports_manifest(rctx, [], env)
         _generate_build_file(rctx, [])
         return
@@ -438,7 +448,6 @@ def _lake_workspace_impl(rctx):
              "lake_ws/.lake/packages/*/.lake/build/lib/lean/. " +
              "Cache get may have failed silently; consider allow_source_build = True.")
 
-    _build_ruleslean_library(rctx, env)
     _generate_imports_manifest(rctx, ready, env)
     _generate_build_file(rctx, ready)
 
@@ -449,8 +458,29 @@ def _build_ruleslean_library(rctx, env):
     We stage it into `ruleslean_lib/` (a sibling of `lake_ws/`) and invoke
     `lake build oleanImports` to compile both the library and the CLI executable.
 
-    Cost: ~3-5s cold per lake_workspace materialization. The cached `.lake/build/`
-    persists across builds.
+    Cost, and why this is now gated behind `emit_imports_manifest`:
+
+    The old docstring said "~3-5s cold", which is roughly right about the CLOCK
+    and badly wrong about the COST. Measured on darwin/arm64, Lean v4.30.0-rc2,
+    fresh output base, uncontended: the six Lake steps total ~9s wall
+    (4.9 + 0.6 + 1.4 + 0.13 + 1.8) — and leave a **149 MB** `.lake/build/` behind,
+    PER lake_workspace. Three lake_workspaces in one output base is three copies.
+    A separate investigation measured 130.9s / 237.6s / 497.5s for this same step
+    on darwin; that was NOT reproduced here, so treat the wall time as
+    environment-dependent somewhere between ~9s and several minutes. Nothing has
+    been measured on linux.
+
+    The bytes are the real cost, not the seconds — and the CLI's only consumer is
+    the imports manifest, which nothing in either org reads. Hence the gate.
+
+    `timeout = 3600`, not 600: at ~9s the cap is nowhere near binding, but the
+    upper end of the other measurements is within 2x of 600s, several
+    lake_workspaces can materialize concurrently on a cold fetch, and a
+    repository-rule timeout is a hard analysis failure rather than a slow build.
+    A larger cap on a step that now rarely runs at all costs nothing.
+
+    The cached `.lake/build/` persists across builds, so the cost is per cold
+    output base, not per build.
     """
 
     # The library lives at @rules_lean//lean/lib/. We need the whole directory;
@@ -468,7 +498,7 @@ def _build_ruleslean_library(rctx, env):
         [lake_bin, "build", "oleanImports"],
         working_directory = "ruleslean_lib",
         environment = env,
-        timeout = 600,
+        timeout = 3600,
         quiet = False,
     )
     if result.return_code != 0:
@@ -484,7 +514,27 @@ def _generate_imports_manifest(rctx, ready, env):
     resulting `<path>\\t<imported-module>` lines aggregate into
     `lake_imports_manifest.tsv` at the @lake_deps repo root, exposed via the
     generated BUILD.
+
+    OPT-IN (`emit_imports_manifest`, default False). Producing the manifest first
+    requires compiling the RulesLean `oleanImports` CLI with the consumer's Lean
+    toolchain — see `_build_ruleslean_library` for what that actually costs — and
+    a workspace that never reads the manifest should not pay for it. When off (or
+    when there are no packages to enumerate) the `.tsv` is still written, empty,
+    so `@<ws>//:lake_imports_manifest` resolves either way and no consumer BUILD
+    file has to care.
     """
+
+    # `not ready` is the dep-free case, and it is deliberately checked BEFORE the
+    # CLI build rather than after: with no packages there are no oleans to
+    # enumerate, so the manifest is empty by construction and the binary would
+    # never be invoked. Building it first is pure cost, and that is exactly the
+    # bug this release fixes — do not reorder these.
+    if not rctx.attr.emit_imports_manifest or not ready:
+        rctx.file("lake_imports_manifest.tsv", "")
+        return
+
+    _build_ruleslean_library(rctx, env)
+
     olean_paths = []
     for _, lib in ready:
         result = rctx.execute(
@@ -581,6 +631,21 @@ lake_workspace = repository_rule(
                   "(e.g. [\"cslib\"]). Needs a configured cache base; artifact path is " +
                   "<base>/<pkg>-<rev12>-<leanver>-<platform>.tar.gz (the .lake/build tree).",
         ),
+        "emit_imports_manifest": attr.bool(
+            default = False,
+            doc = "If True, populate `@<ws>//:lake_imports_manifest` (the " +
+                  "`<olean-path>\\t<imported-module>` TSV over every resolved package). " +
+                  "Off by default because producing it first compiles the RulesLean " +
+                  "`oleanImports` CLI with the consumer's Lean toolchain, which leaves a " +
+                  "~149 MB `.lake/build/` behind PER lake_workspace (measured, " +
+                  "darwin/arm64, Lean v4.30.0-rc2). " +
+                  "The manifest is a niche introspection aid (\"what does olean X " +
+                  "import?\") and nothing needs it to build Lean code, so the default is " +
+                  "not to pay for it.\n\n" +
+                  "The target and the `.tsv` exist either way — empty when off — so " +
+                  "flipping this attr never breaks a consumer's BUILD file, only the " +
+                  "contents it reads.",
+        ),
         # Wired by the lake extension to the shared @lean_dist repo for this version,
         # so the workspace reuses one toolchain extraction instead of its own copy.
         "lean_dist_lake": attr.label(
@@ -628,6 +693,7 @@ def _lake_extension_impl(mctx):
             cache_roots = tag.cache_roots,
             olean_cache = tag.olean_cache,
             olean_cache_packages = tag.olean_cache_packages,
+            emit_imports_manifest = tag.emit_imports_manifest,
             lean_dist_lake = "@%s//:lean_toolchain/bin/lake" % dist,
             lean_dist_toolchain = "@%s//:lean_toolchain" % dist,
         )
@@ -653,6 +719,13 @@ _workspace_tag = tag_class(attrs = {
     "olean_cache_packages": attr.string_list(
         default = [],
         doc = "Lake packages to fetch from the olean cache instead of building.",
+    ),
+    "emit_imports_manifest": attr.bool(
+        default = False,
+        doc = "Populate `@<ws>//:lake_imports_manifest`. Off by default: producing it " +
+              "compiles the RulesLean `oleanImports` CLI (~149 MB of `.lake/build/`) per " +
+              "workspace, and building Lean code never needs it. The target exists " +
+              "either way — empty when off. See the repo rule's attr.",
     ),
 })
 

@@ -58,7 +58,7 @@ jobs:
   # and setup-bazel caches it), and catching it post-merge is exactly what
   # already happened.
   olean_archive:
-    name: lean_olean_archive round-trip (linux)
+    name: olean archive + LEAN_PATH namespace (linux)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -68,7 +68,12 @@ jobs:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}-olean
           repository-cache: true
-      - run: bazel test //examples/olean_roundtrip/... --test_output=errors
+      - run: |
+          bazel test //examples/olean_roundtrip/... --test_output=errors
+          # LEAN_PATH namespace resolution: two dep roots both owning `Pg/`,
+          # consumed by a target rooted at `App/`. Lean does not fall through
+          # LEAN_PATH roots, so this fails unless the shared namespace is staged.
+          bazel test //examples/shared_namespace/... --test_output=errors
 
   # End-to-end smoke: actually runs `lake_workspace` against a Batteries-only
   # Lake workspace (no Mathlib → no multi-GB Reservoir cache download), then

@@ -103,10 +103,45 @@ def _collect_dep_lean_info(deps):
 def _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops):
     """Build the topo-compile manifest lines for a target's prebuilt olean deps.
 
-    Oleans sharing one of the consumer's top-level namespaces are `stage`d into
-    the compile root (Lean won't fall through LEAN_PATH roots for a namespace);
-    disjoint deps go on `leanpath` (no copy).
+    Lean resolves a module name in the FIRST `LEAN_PATH` root that owns its
+    top-level directory and does not fall through to later roots. So a top-level
+    namespace has to end up in exactly one place, and there are two ways it can
+    be split across more than one:
+
+      * the CONSUMER also has sources under it — the original case;
+      * TWO OR MORE DEPS own it — e.g. two published modules both rooted at
+        `Pg/`. Handling only the first case made this a silent failure:
+        modules from the second dep resolve to the first dep's root and the
+        compile dies with "object file ... does not exist" naming a path inside
+        the wrong repository.
+
+    Either way the answer is to `stage` — copy those oleans into the compile
+    root so they merge into a single tree. Only namespaces owned by exactly one
+    dep and untouched by the consumer can safely go on `leanpath` (no copy).
     """
+
+    # Pass 1: which dep roots own each top-level namespace?
+    roots_by_top = {}
+    for f in dep_files.to_list():
+        if not f.path.endswith(".olean"):
+            continue
+        for d in dep_marker_dirs:
+            if f.path.startswith(d + "/"):
+                top = f.path[len(d) + 1:].split("/")[0]
+                if top not in roots_by_top:
+                    roots_by_top[top] = {}
+                roots_by_top[top][d] = True
+                break
+
+    # A namespace owned by more than one dep root cannot be resolved through
+    # LEAN_PATH; it must be merged.
+    contested = {}
+    for top in roots_by_top:
+        if len(roots_by_top[top]) > 1:
+            contested[top] = True
+
+    # Pass 2: emit. Decided per file, so a dep root whose namespaces are partly
+    # contested still contributes its uncontested ones via leanpath.
     lines = []
     leanpath = {}
     for f in dep_files.to_list():
@@ -115,7 +150,8 @@ def _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops):
         for d in dep_marker_dirs:
             if f.path.startswith(d + "/"):
                 drel = f.path[len(d) + 1:]
-                if drel.split("/")[0] in consumer_tops:
+                top = drel.split("/")[0]
+                if top in consumer_tops or top in contested:
                     lines.append("stage\t" + f.path + "\t" + drel)
                 else:
                     leanpath[d] = True

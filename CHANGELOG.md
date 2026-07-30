@@ -4,6 +4,41 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.6.2 — two deps can share a top-level namespace
+
+Lean resolves a module name in the **first** `LEAN_PATH` root that owns its
+top-level directory and does not fall through to later roots. `_dep_manifest_lines`
+handled one consequence of that — a dep colliding with the *consumer's* own
+namespace gets staged into the compile root — but not the other: **two deps
+colliding with each other**.
+
+Two published modules both rooted at `Pg/` therefore could not both be consumed,
+unless the consumer happened to have `Pg/` sources of its own. The failure is
+silent and misdirected — the compile dies naming a path inside the *wrong*
+repository:
+
+    App/Main.lean:4:0: error: object file
+      '.../pg_catalog_lib/Pg/Query/Top.olean' of module Pg.Query.Top does not exist
+
+`Pg/Query/Top.olean` is in pg_query's root; Lean looked only in pg_catalog's,
+because that root owns `Pg/` and it stopped there.
+
+Now a top-level namespace owned by more than one dep root is staged, exactly as
+one colliding with the consumer already was. Namespaces owned by a single dep and
+untouched by the consumer still go on `leanpath` with no copy, so the common case
+is unchanged. The decision is per-file, so a dep whose namespaces are partly
+contested still contributes its uncontested ones via `leanpath`.
+
+**Why it mattered.** This blocked the whole point of publishing compiled oleans
+for any consumer whose sources are rooted elsewhere. Concretely: leangres ships
+`pgcatalog` and `pgquery`, both rooted at `Pg/`, and their real consumer is rooted
+at `Aion/` — so it could not adopt the compiled artifacts at all and had to keep
+recompiling from source.
+
+`//examples/shared_namespace` is the regression test, and it is in CI. Verified by
+deliberate break: reverted to the old `_dep_manifest_lines` and confirmed the test
+fails with the error above, then restored.
+
 ## 0.6.1 — `lean_olean_archive` builds on linux, and is byte-reproducible
 
 `lean_olean_archive` tarred the import root directly with `tar -czhf`. The

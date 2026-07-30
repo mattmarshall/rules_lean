@@ -1,0 +1,37 @@
+load("@rules_lean//lean:lean.bzl", "lean_library", "lean_test")
+
+# Regression test for LEAN_PATH namespace resolution.
+#
+# Lean resolves a module in the FIRST LEAN_PATH root owning its top-level
+# directory and does not fall through. Two dep roots both owning `Pg/` therefore
+# cannot both be reached via LEAN_PATH — the second one's modules resolve into
+# the first one's root and the compile fails with "object file ... does not
+# exist".
+#
+# `_dep_manifest_lines` used to stage a dep only when it shared a top-level
+# namespace with the CONSUMER. Here the consumer is `App`, disjoint from both
+# deps, so nothing was staged and both went on leanpath — the failing shape.
+# Now a namespace owned by more than one dep root is staged regardless.
+#
+# This mirrors the real case: leangres publishes pgcatalog and pgquery, both
+# rooted at `Pg/`, and a consumer rooted at `Aion/` has to import both.
+
+lean_library(
+    name = "pg_catalog",
+    srcs = ["Pg/Catalog/Tables.lean"],
+)
+
+lean_library(
+    name = "pg_query",
+    srcs = ["Pg/Query/Top.lean"],
+)
+
+lean_test(
+    name = "two_deps_one_namespace_test",
+    srcs = ["App/Main.lean"],
+    entry = "App/Main.lean",
+    deps = [
+        ":pg_catalog",
+        ":pg_query",
+    ],
+)

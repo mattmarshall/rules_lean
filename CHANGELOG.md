@@ -63,11 +63,13 @@ point: `sorryAx` and `Lean.ofReduceBool`. Tightening it is the interesting
 direction — a theorem that needs only `[propext, Quot.sound]` today and picks
 up `Classical.choice` tomorrow is a real change, and this reports it.
 
-Verified by mutation on soma's actual proofs, not by assumption: with the
-three-axiom allowlist all six theorems pass; drop `Classical.choice` and four
-of them fail by name while `runBarriered_perm_invariant` and
-`network_confluence_barriered` still pass, because those genuinely need only
-two. A gate that cannot distinguish those is not a gate.
+Verified by mutation on soma's actual proofs, not by assumption. soma's
+`Audit.lean` names eight theorems; with the three-axiom allowlist all eight
+pass. Drop `Classical.choice` and **five fail by name** while
+`runBarriered_perm_invariant`, `network_confluence_barriered` and
+`drive_reaches` still pass, because those genuinely need only two — which is
+exactly what soma's README claims for them. A gate that cannot tell those
+apart is not a gate.
 
 `//examples/axiom_audit` carries four positive targets and three negative ones
 (`*_is_rejected`, `manual`-tagged, run by CI with the exit code asserted

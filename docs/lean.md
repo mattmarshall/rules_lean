@@ -31,6 +31,19 @@ User-facing rules:
                            a declared output file. The Lean kernel becomes
                            the source of truth for emitted artifacts (SQL,
                            TTL, Markdown). Same `deps` plumbing as lean_test.
+  lean_axiom_test        — assert that each named theorem's TRANSITIVE axiom
+                           dependencies are inside an allowlist, and fail the
+                           build otherwise. The check a proof repository
+                           actually wants: `#print axioms` prints, it does not
+                           gate.
+
+Two things every rule here now does, which none of them did before 0.7.0:
+
+  * compiler diagnostics are forwarded even on a SUCCESSFUL compile. `lean`
+    exits 0 on a `sorry` (it is a warning) and on `#print axioms`, and the
+    driver only echoed output when the exit code was non-zero — so both
+    vanished. A `sorry` was a green, silent build.
+  * `forbid_sorry` (default True) makes an admitted goal a build failure.
 
 `lean_library`/`lean_olean_archive`/`lean_imported_library` (added 0.4.0) are
 the cross-repo compiled-artifact seam: split a monolithic Lean library into
@@ -41,6 +54,32 @@ a compacted heap image), so a consumer must pin the SAME `lean-toolchain` and
 `select()` the matching-platform artifact; Lean itself rejects a mismatched
 olean loudly at use.
 
+<a id="lean_axiom_test"></a>
+
+## lean_axiom_test
+
+<pre>
+load("@rules_lean//lean:lean.bzl", "lean_axiom_test")
+
+lean_axiom_test(<a href="#lean_axiom_test-name">name</a>, <a href="#lean_axiom_test-deps">deps</a>, <a href="#lean_axiom_test-srcs">srcs</a>, <a href="#lean_axiom_test-allowed_axioms">allowed_axioms</a>, <a href="#lean_axiom_test-forbid_sorry">forbid_sorry</a>, <a href="#lean_axiom_test-imports">imports</a>, <a href="#lean_axiom_test-theorems">theorems</a>)
+</pre>
+
+Fail the build unless every named theorem's transitive axiom dependencies are inside `allowed_axioms`.
+
+**ATTRIBUTES**
+
+
+| Name  | Description | Type | Mandatory | Default |
+| :------------- | :------------- | :------------- | :------------- | :------------- |
+| <a id="lean_axiom_test-name"></a>name |  A unique name for this target.   | <a href="https://bazel.build/concepts/labels#target-names">Name</a> | required |  |
+| <a id="lean_axiom_test-deps"></a>deps |  Compiled Lean libraries holding the theorems (e.g. a `lean_library`). Name the modules to import via `imports`.   | <a href="https://bazel.build/concepts/labels">List of labels</a> | optional |  `[]`  |
+| <a id="lean_axiom_test-srcs"></a>srcs |  Lean sources to compile before auditing. Compiled in import-topological order, so list order is irrelevant (a `glob()` is fine). May be empty when the theorems come from `deps`.   | <a href="https://bazel.build/concepts/labels">List of labels</a> | optional |  `[]`  |
+| <a id="lean_axiom_test-allowed_axioms"></a>allowed_axioms |  The allowlist. A theorem depending on anything outside it fails the build, naming the theorem and the offending axioms.<br><br>Defaults to Lean's three standard axioms — `propext`, `Classical.choice`, `Quot.sound` — which is classical logic with quotient types. What that default EXCLUDES is the point: `sorryAx` (an admitted goal) and `Lean.ofReduceBool` (a `native_decide`, which trusts the compiler rather than the kernel).<br><br>Tighten it when a theorem is meant to be constructive: a proof that needs only `[propext, Quot.sound]` today and silently acquires `Classical.choice` tomorrow is a real change, and this is what reports it. An empty list allows NOTHING.   | List of strings | optional |  `["propext", "Classical.choice", "Quot.sound"]`  |
+| <a id="lean_axiom_test-forbid_sorry"></a>forbid_sorry |  If True (the default), an admitted goal — `sorry`, or any tactic that elaborates to `sorryAx` — fails the build.<br><br>Lean reports `sorry` as a WARNING and exits 0, so before 0.7.0 an admitted theorem type-checked, the driver discarded the warning along with the rest of the compiler's output, and the target went green. A proof that is not a proof is the one thing a Lean ruleset must not report as passing.<br><br>Set False for a development tree that is deliberately mid-proof. It does not suppress the warning — that is now always printed — only the failure.   | Boolean | optional |  `True`  |
+| <a id="lean_axiom_test-imports"></a>imports |  Lean modules the generated audit imports (e.g. `["Soma"]`). Defaults to every module in `srcs`, which is what a single-library audit wants; required when the theorems come only from `deps`.   | List of strings | optional |  `[]`  |
+| <a id="lean_axiom_test-theorems"></a>theorems |  Fully-qualified theorem names to audit (e.g. `["Soma.network_confluence"]`). Each is resolved as a real constant, so a typo fails rather than passing vacuously. An empty list is an error for the same reason.   | List of strings | required |  |
+
+
 <a id="lean_binary"></a>
 
 ## lean_binary
@@ -48,7 +87,7 @@ olean loudly at use.
 <pre>
 load("@rules_lean//lean:lean.bzl", "lean_binary")
 
-lean_binary(<a href="#lean_binary-name">name</a>, <a href="#lean_binary-deps">deps</a>, <a href="#lean_binary-srcs">srcs</a>, <a href="#lean_binary-entry">entry</a>)
+lean_binary(<a href="#lean_binary-name">name</a>, <a href="#lean_binary-deps">deps</a>, <a href="#lean_binary-srcs">srcs</a>, <a href="#lean_binary-entry">entry</a>, <a href="#lean_binary-forbid_sorry">forbid_sorry</a>)
 </pre>
 
 A runnable Lean executable: compiles srcs to an olean root and `lean --run`s the entry with runtime argv.
@@ -62,6 +101,7 @@ A runnable Lean executable: compiles srcs to an olean root and `lean --run`s the
 | <a id="lean_binary-deps"></a>deps |  -   | <a href="https://bazel.build/concepts/labels">List of labels</a> | optional |  `[]`  |
 | <a id="lean_binary-srcs"></a>srcs |  -   | <a href="https://bazel.build/concepts/labels">List of labels</a> | required |  |
 | <a id="lean_binary-entry"></a>entry |  Module-path of the src whose `main` is the entry point.   | String | required |  |
+| <a id="lean_binary-forbid_sorry"></a>forbid_sorry |  If True (the default), an admitted goal — `sorry`, or any tactic that elaborates to `sorryAx` — fails the build.<br><br>Lean reports `sorry` as a WARNING and exits 0, so before 0.7.0 an admitted theorem type-checked, the driver discarded the warning along with the rest of the compiler's output, and the target went green. A proof that is not a proof is the one thing a Lean ruleset must not report as passing.<br><br>Set False for a development tree that is deliberately mid-proof. It does not suppress the warning — that is now always printed — only the failure.   | Boolean | optional |  `True`  |
 
 
 <a id="lean_emit"></a>
@@ -71,7 +111,7 @@ A runnable Lean executable: compiles srcs to an olean root and `lean --run`s the
 <pre>
 load("@rules_lean//lean:lean.bzl", "lean_emit")
 
-lean_emit(<a href="#lean_emit-name">name</a>, <a href="#lean_emit-deps">deps</a>, <a href="#lean_emit-srcs">srcs</a>, <a href="#lean_emit-data">data</a>, <a href="#lean_emit-out">out</a>, <a href="#lean_emit-entry">entry</a>)
+lean_emit(<a href="#lean_emit-name">name</a>, <a href="#lean_emit-deps">deps</a>, <a href="#lean_emit-srcs">srcs</a>, <a href="#lean_emit-data">data</a>, <a href="#lean_emit-out">out</a>, <a href="#lean_emit-entry">entry</a>, <a href="#lean_emit-forbid_sorry">forbid_sorry</a>)
 </pre>
 
 
@@ -87,6 +127,7 @@ lean_emit(<a href="#lean_emit-name">name</a>, <a href="#lean_emit-deps">deps</a>
 | <a id="lean_emit-data"></a>data |  Non-Lean files staged alongside `srcs` in the action's work directory (NOT compiled). The Lean entry runs from that directory, so it can `IO.FS.readFile` them by their package-relative path. Typical use: fixture `.dat` / `.txt` / `.json` inputs the entry processes.   | <a href="https://bazel.build/concepts/labels">List of labels</a> | optional |  `[]`  |
 | <a id="lean_emit-out"></a>out |  The emitted artifact (one file). Filename should reflect the artifact kind.   | <a href="https://bazel.build/concepts/labels">Label</a> | required |  |
 | <a id="lean_emit-entry"></a>entry |  Path of the entry-point .lean file (relative to the package) defining `main : IO Unit`. Stdout is captured to `out`.   | String | required |  |
+| <a id="lean_emit-forbid_sorry"></a>forbid_sorry |  If True (the default), an admitted goal — `sorry`, or any tactic that elaborates to `sorryAx` — fails the build.<br><br>Lean reports `sorry` as a WARNING and exits 0, so before 0.7.0 an admitted theorem type-checked, the driver discarded the warning along with the rest of the compiler's output, and the target went green. A proof that is not a proof is the one thing a Lean ruleset must not report as passing.<br><br>Set False for a development tree that is deliberately mid-proof. It does not suppress the warning — that is now always printed — only the failure.   | Boolean | optional |  `True`  |
 
 
 <a id="lean_imported_library"></a>
@@ -118,7 +159,7 @@ Expose an unpacked .olean release tarball as LeanInfo (no recompile).
 <pre>
 load("@rules_lean//lean:lean.bzl", "lean_library")
 
-lean_library(<a href="#lean_library-name">name</a>, <a href="#lean_library-deps">deps</a>, <a href="#lean_library-srcs">srcs</a>)
+lean_library(<a href="#lean_library-name">name</a>, <a href="#lean_library-deps">deps</a>, <a href="#lean_library-srcs">srcs</a>, <a href="#lean_library-forbid_sorry">forbid_sorry</a>)
 </pre>
 
 Compile .lean sources to a persistent .olean import-root tree and expose it as LeanInfo.
@@ -131,6 +172,7 @@ Compile .lean sources to a persistent .olean import-root tree and expose it as L
 | <a id="lean_library-name"></a>name |  A unique name for this target.   | <a href="https://bazel.build/concepts/labels#target-names">Name</a> | required |  |
 | <a id="lean_library-deps"></a>deps |  Compiled Lean libraries this one imports. Same-top-namespace deps are staged into the compile root; disjoint ones are on LEAN_PATH. All propagate transitively in this library's LeanInfo.   | <a href="https://bazel.build/concepts/labels">List of labels</a> | optional |  `[]`  |
 | <a id="lean_library-srcs"></a>srcs |  All .lean files in this library. Module path is derived from the file's path relative to its own package. Compiled in import-topological order, so list order is irrelevant (a `glob()` is fine).   | <a href="https://bazel.build/concepts/labels">List of labels</a> | required |  |
+| <a id="lean_library-forbid_sorry"></a>forbid_sorry |  If True (the default), an admitted goal — `sorry`, or any tactic that elaborates to `sorryAx` — fails the build.<br><br>Lean reports `sorry` as a WARNING and exits 0, so before 0.7.0 an admitted theorem type-checked, the driver discarded the warning along with the rest of the compiler's output, and the target went green. A proof that is not a proof is the one thing a Lean ruleset must not report as passing.<br><br>Set False for a development tree that is deliberately mid-proof. It does not suppress the warning — that is now always printed — only the failure.   | Boolean | optional |  `True`  |
 
 
 <a id="lean_main_test"></a>
@@ -140,7 +182,7 @@ Compile .lean sources to a persistent .olean import-root tree and expose it as L
 <pre>
 load("@rules_lean//lean:lean.bzl", "lean_main_test")
 
-lean_main_test(<a href="#lean_main_test-name">name</a>, <a href="#lean_main_test-deps">deps</a>, <a href="#lean_main_test-srcs">srcs</a>, <a href="#lean_main_test-data">data</a>, <a href="#lean_main_test-entry">entry</a>)
+lean_main_test(<a href="#lean_main_test-name">name</a>, <a href="#lean_main_test-deps">deps</a>, <a href="#lean_main_test-srcs">srcs</a>, <a href="#lean_main_test-data">data</a>, <a href="#lean_main_test-entry">entry</a>, <a href="#lean_main_test-forbid_sorry">forbid_sorry</a>)
 </pre>
 
 
@@ -155,6 +197,7 @@ lean_main_test(<a href="#lean_main_test-name">name</a>, <a href="#lean_main_test
 | <a id="lean_main_test-srcs"></a>srcs |  All .lean files needed to compile the entry. Compiled in import-topological order, so list order is irrelevant (a `glob()` is fine).   | <a href="https://bazel.build/concepts/labels">List of labels</a> | required |  |
 | <a id="lean_main_test-data"></a>data |  Non-Lean files staged at their workspace-relative path in the action's work directory. The Lean entry runs from that directory, so it can `IO.FS.readFile` them.   | <a href="https://bazel.build/concepts/labels">List of labels</a> | optional |  `[]`  |
 | <a id="lean_main_test-entry"></a>entry |  Path of the entry-point .lean file (relative to the package) defining `main : IO UInt32` (test result = exit code).   | String | required |  |
+| <a id="lean_main_test-forbid_sorry"></a>forbid_sorry |  If True (the default), an admitted goal — `sorry`, or any tactic that elaborates to `sorryAx` — fails the build.<br><br>Lean reports `sorry` as a WARNING and exits 0, so before 0.7.0 an admitted theorem type-checked, the driver discarded the warning along with the rest of the compiler's output, and the target went green. A proof that is not a proof is the one thing a Lean ruleset must not report as passing.<br><br>Set False for a development tree that is deliberately mid-proof. It does not suppress the warning — that is now always printed — only the failure.   | Boolean | optional |  `True`  |
 
 
 <a id="lean_olean_archive"></a>
@@ -208,7 +251,7 @@ lean_prebuilt_library(<a href="#lean_prebuilt_library-name">name</a>, <a href="#
 <pre>
 load("@rules_lean//lean:lean.bzl", "lean_test")
 
-lean_test(<a href="#lean_test-name">name</a>, <a href="#lean_test-deps">deps</a>, <a href="#lean_test-srcs">srcs</a>, <a href="#lean_test-entry">entry</a>)
+lean_test(<a href="#lean_test-name">name</a>, <a href="#lean_test-deps">deps</a>, <a href="#lean_test-srcs">srcs</a>, <a href="#lean_test-entry">entry</a>, <a href="#lean_test-forbid_sorry">forbid_sorry</a>)
 </pre>
 
 
@@ -222,6 +265,7 @@ lean_test(<a href="#lean_test-name">name</a>, <a href="#lean_test-deps">deps</a>
 | <a id="lean_test-deps"></a>deps |  Prebuilt Lean libraries. Same-top-namespace deps are staged into the compile root; disjoint ones are on LEAN_PATH.   | <a href="https://bazel.build/concepts/labels">List of labels</a> | optional |  `[]`  |
 | <a id="lean_test-srcs"></a>srcs |  All .lean files in the proof tree. Module path is derived from the file's path relative to this BUILD.bazel's package. Compiled in import-topological order, so list order is irrelevant — `glob(["**/*.lean"])` is fine.   | <a href="https://bazel.build/concepts/labels">List of labels</a> | required |  |
 | <a id="lean_test-entry"></a>entry |  Path of the entry-point .lean file relative to the package.   | String | required |  |
+| <a id="lean_test-forbid_sorry"></a>forbid_sorry |  If True (the default), an admitted goal — `sorry`, or any tactic that elaborates to `sorryAx` — fails the build.<br><br>Lean reports `sorry` as a WARNING and exits 0, so before 0.7.0 an admitted theorem type-checked, the driver discarded the warning along with the rest of the compiler's output, and the target went green. A proof that is not a proof is the one thing a Lean ruleset must not report as passing.<br><br>Set False for a development tree that is deliberately mid-proof. It does not suppress the warning — that is now always printed — only the failure.   | Boolean | optional |  `True`  |
 
 
 <a id="lean_toolchain"></a>

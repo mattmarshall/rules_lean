@@ -1,0 +1,103 @@
+load("@rules_lean//lean:lean.bzl", "lean_axiom_test", "lean_library", "lean_test")
+
+# `lean_axiom_test`, and the `forbid_sorry` gate, with their failure paths.
+#
+# Every claim a gate makes is only worth what its NEGATIVE test is worth, so
+# each pass here has a matching `_is_rejected` target that must fail, plus a
+# control that isolates WHICH gate is doing the rejecting. The negatives are
+# `manual`-tagged (they cannot be in `bazel test //...`, they are meant to be
+# red) and CI runs them explicitly, asserting a non-zero exit — see the
+# `axiom_audit` job in .github/workflows/ci.yml.
+#
+# Fixture axiom footprints, from `#print axioms`:
+#   Audited.constructive   — none
+#   Audited.propositional  — [propext]
+#   Audited.classical      — [propext, Classical.choice, Quot.sound]
+#   Audited.admitted       — [sorryAx]
+
+lean_library(
+    name = "audited",
+    srcs = ["Audited/Arith.lean"],
+)
+
+# ── Positive ──────────────────────────────────────────────────────────────
+
+# The default allowlist: Lean's three standard axioms. Accepts all three
+# honest theorems.
+lean_axiom_test(
+    name = "default_allowlist_test",
+    srcs = ["Audited/Arith.lean"],
+    theorems = [
+        "Audited.constructive",
+        "Audited.propositional",
+        "Audited.classical",
+    ],
+)
+
+# A TIGHTER allowlist that still holds. Without this, a rule that ignored
+# `allowed_axioms` entirely and always passed would look identical to a working
+# one on `default_allowlist_test` alone.
+lean_axiom_test(
+    name = "tight_allowlist_test",
+    srcs = ["Audited/Arith.lean"],
+    allowed_axioms = ["propext"],
+    theorems = [
+        "Audited.constructive",
+        "Audited.propositional",
+    ],
+)
+
+# Same audit, but against a COMPILED dep rather than sources — the `deps` +
+# `imports` path, which is how a consumer with a published olean tree wires it.
+lean_axiom_test(
+    name = "via_dep_test",
+    imports = ["Audited.Arith"],
+    theorems = ["Audited.classical"],
+    deps = [":audited"],
+)
+
+# The control for `sorry_is_rejected` below: the same file, same rule, gate
+# off. If this ever goes red the negative test proves nothing, because the
+# failure would not be attributable to the gate.
+lean_test(
+    name = "sorry_allowed_when_permitted_test",
+    srcs = ["Audited/Admitted.lean"],
+    entry = "Audited/Admitted.lean",
+    forbid_sorry = False,
+)
+
+# ── Negative: these MUST fail. CI asserts it. ─────────────────────────────
+
+# The allowlist tightened by one axiom. `Audited.classical` needs
+# `Classical.choice`; dropping it from the allowlist must turn the build red.
+lean_axiom_test(
+    name = "tightened_allowlist_is_rejected",
+    srcs = ["Audited/Arith.lean"],
+    allowed_axioms = [
+        "propext",
+        "Quot.sound",
+    ],
+    tags = ["manual"],
+    theorems = ["Audited.classical"],
+)
+
+# `sorryAx` is in no allowlist, so an admitted theorem fails the AXIOM gate.
+# `forbid_sorry = False` on purpose: it isolates the axiom check from the
+# compile-time sorry check, so this target proves the audit itself rejects it.
+lean_axiom_test(
+    name = "admitted_is_rejected",
+    srcs = ["Audited/Admitted.lean"],
+    forbid_sorry = False,
+    imports = ["Audited.Admitted"],
+    tags = ["manual"],
+    theorems = ["Audited.admitted"],
+)
+
+# The compile-time gate, independent of any axiom audit: `forbid_sorry`
+# defaults True, so merely compiling a tree containing a `sorry` is red.
+lean_test(
+    name = "sorry_is_rejected",
+    srcs = ["Audited/Admitted.lean"],
+    entry = "Audited/Admitted.lean",
+    tags = ["manual"],
+)

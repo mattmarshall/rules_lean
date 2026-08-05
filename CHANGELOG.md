@@ -4,6 +4,83 @@ All notable changes to rules_lean. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.7.0 — a `sorry` was a GREEN, SILENT build; and axioms are now a gate
+
+Two failures in the same place, found by trying to put citizen-sh/soma's six
+confluence theorems behind a Bazel target. The proofs themselves compiled
+first try — `lean_test` over Lean 4 core with no Mathlib worked exactly as
+documented, on darwin/arm64 and linux. What did not work is everything that
+makes a green check mean something.
+
+**A `sorry` passed.** `lean` reports an admitted goal as a WARNING and exits 0.
+`topo_compile` echoed the compiler's output only when the exit code was
+non-zero — so the warning was discarded along with the exit code that said
+nothing was wrong, and the target went green. Measured, not inferred: a
+`theorem … := by sorry` appended to a real proof tree, rebuilt, `PASSED`,
+zero output. The control (a genuine type error in the same file) went red, so
+the harness worked; it just could not see this.
+
+Two things change. The driver now forwards compiler diagnostics on SUCCESS as
+well as failure — which also un-hides `#print axioms`, whose output was going
+into the same void, so an `Audit.lean` full of them looked like it had run and
+found nothing. And **`forbid_sorry` (default `True`)** makes an admitted goal
+a build failure, on every rule that compiles Lean.
+
+> **Behavior change.** A tree containing a `sorry` that built green before now
+> fails. That is the point — but it is a real break, so: `forbid_sorry = False`
+> on the target restores the old behavior, and does not re-hide the warning.
+
+The gate matches the compiler's message text, which is exactly as brittle as
+it sounds, so `//examples/axiom_audit:sorry_is_rejected` is a NEGATIVE test in
+CI. If upstream rewords the warning, that test goes green and the job fails on
+it rather than the check quietly becoming a no-op. (Byte-identical in 4.29.1
+and 4.32.2, both checked in-tree.)
+
+**`#print axioms` prints; it does not gate.** A proof that silently acquires
+an axiom — a `sorry` in a lemma three imports down, a `native_decide` that
+swaps the kernel for the compiler — keeps printing a line nobody reads. The
+new `lean_axiom_test` fails the build instead:
+
+```python
+lean_axiom_test(
+    name = "axioms_test",
+    srcs = glob(["**/*.lean"]),
+    theorems = ["Soma.network_confluence", "Soma.run_perm_invariant"],
+    # allowed_axioms defaults to [propext, Classical.choice, Quot.sound]
+)
+```
+
+It generates a Lean module and checks at ELABORATION time with
+`Lean.collectAxioms` — the same API behind `#print axioms`, so it agrees with
+the hand audit by construction rather than by re-implementing it, and it is
+transitive. `RulesLean.Internal.AxiomDeps.declaredAxioms` is NOT that: it is a
+header-only scan of axioms a module declares directly, and its own docstring
+says the transitive version "lands once there's a concrete consumer pushing on
+the shape". soma was the consumer.
+
+The default allowlist is Lean's three standard axioms. What it excludes is the
+point: `sorryAx` and `Lean.ofReduceBool`. Tightening it is the interesting
+direction — a theorem that needs only `[propext, Quot.sound]` today and picks
+up `Classical.choice` tomorrow is a real change, and this reports it.
+
+Verified by mutation on soma's actual proofs, not by assumption: with the
+three-axiom allowlist all six theorems pass; drop `Classical.choice` and four
+of them fail by name while `runBarriered_perm_invariant` and
+`network_confluence_barriered` still pass, because those genuinely need only
+two. A gate that cannot distinguish those is not a gate.
+
+`//examples/axiom_audit` carries four positive targets and three negative ones
+(`*_is_rejected`, `manual`-tagged, run by CI with the exit code asserted
+non-zero), plus a control — the same `sorry` file with `forbid_sorry = False`,
+which must PASS, so a red negative is attributable to the gate and not to a
+broken fixture.
+
+**Lean v4.32.2 is pinned**, all four platforms. It was not in
+`known_lean_versions.bzl`, so any workspace on a modern toolchain downloaded
+the compiler UNVERIFIED behind a `print()` warning — including soma, whose
+`lean-toolchain` says `v4.32.2`. Hashes are of the release ASSETS (immutable),
+not `/archive/refs/tags/` tarballs.
+
 ## 0.6.2 — two deps can share a top-level namespace
 
 Lean resolves a module name in the **first** `LEAN_PATH` root that owns its

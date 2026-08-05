@@ -29,6 +29,19 @@ User-facing rules:
                            a declared output file. The Lean kernel becomes
                            the source of truth for emitted artifacts (SQL,
                            TTL, Markdown). Same `deps` plumbing as lean_test.
+  lean_axiom_test        — assert that each named theorem's TRANSITIVE axiom
+                           dependencies are inside an allowlist, and fail the
+                           build otherwise. The check a proof repository
+                           actually wants: `#print axioms` prints, it does not
+                           gate.
+
+Two things every rule here now does, which none of them did before 0.7.0:
+
+  * compiler diagnostics are forwarded even on a SUCCESSFUL compile. `lean`
+    exits 0 on a `sorry` (it is a warning) and on `#print axioms`, and the
+    driver only echoed output when the exit code was non-zero — so both
+    vanished. A `sorry` was a green, silent build.
+  * `forbid_sorry` (default True) makes an admitted goal a build failure.
 
 `lean_library`/`lean_olean_archive`/`lean_imported_library` (added 0.4.0) are
 the cross-repo compiled-artifact seam: split a monolithic Lean library into
@@ -160,6 +173,23 @@ def _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops):
         lines.append("leanpath\t" + d)
     return lines
 
+_FORBID_SORRY_DOC = """If True (the default), an admitted goal — `sorry`, or any tactic that \
+elaborates to `sorryAx` — fails the build.
+
+Lean reports `sorry` as a WARNING and exits 0, so before 0.7.0 an admitted \
+theorem type-checked, the driver discarded the warning along with the rest of \
+the compiler's output, and the target went green. A proof that is not a proof \
+is the one thing a Lean ruleset must not report as passing.
+
+Set False for a development tree that is deliberately mid-proof. It does not \
+suppress the warning — that is now always printed — only the failure."""
+
+def _forbid_sorry_line(ctx):
+    """Manifest directive for the topo-compile driver's sorry gate."""
+    return "forbid_sorry\t" + ("1" if ctx.attr.forbid_sorry else "0")
+
+_FORBID_SORRY_ATTR = attr.bool(default = True, doc = _FORBID_SORRY_DOC)
+
 def _lean_toolchain_impl(ctx):
     return [platform_common.ToolchainInfo(
         leantc = LeanToolchainInfo(
@@ -240,6 +270,7 @@ def _lean_test_impl(ctx):
     for src, rel in rel_paths:
         lines.append("stage\t" + src.path + "\t" + rel)
         lines.append("module\t" + rel)
+    lines.append(_forbid_sorry_line(ctx))
     lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
     manifest = ctx.actions.declare_file(name + ".topo_manifest")
@@ -281,6 +312,7 @@ lean_test = rule(
             providers = [LeanInfo],
             doc = "Prebuilt Lean libraries. Same-top-namespace deps are staged into the compile root; disjoint ones are on LEAN_PATH.",
         ),
+        "forbid_sorry": _FORBID_SORRY_ATTR,
         "_driver": attr.label(
             default = "@rules_lean//lean/private:topo_compile.lean",
             allow_single_file = True,
@@ -345,6 +377,7 @@ def _lean_emit_impl(ctx):
         lines.append("module\t" + rel)
     for src, rel in data_paths:
         lines.append("stage\t" + src.path + "\t" + rel)
+    lines.append(_forbid_sorry_line(ctx))
     lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
     manifest = ctx.actions.declare_file(name + ".topo_manifest")
@@ -388,6 +421,7 @@ lean_emit = rule(
             allow_files = True,
             doc = "Non-Lean files staged alongside `srcs` in the action's work directory (NOT compiled). The Lean entry runs from that directory, so it can `IO.FS.readFile` them by their package-relative path. Typical use: fixture `.dat` / `.txt` / `.json` inputs the entry processes.",
         ),
+        "forbid_sorry": _FORBID_SORRY_ATTR,
         "_driver": attr.label(
             default = "@rules_lean//lean/private:topo_compile.lean",
             allow_single_file = True,
@@ -527,6 +561,7 @@ def _lean_main_test_impl(ctx):
         lines.append("module\t" + rel)
     for src, rel in data_paths:
         lines.append("stage\t" + src.path + "\t" + rel)
+    lines.append(_forbid_sorry_line(ctx))
     lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
     manifest = ctx.actions.declare_file(name + ".topo_manifest")
@@ -569,6 +604,7 @@ lean_main_test = rule(
             allow_files = True,
             doc = "Non-Lean files staged at their workspace-relative path in the action's work directory. The Lean entry runs from that directory, so it can `IO.FS.readFile` them.",
         ),
+        "forbid_sorry": _FORBID_SORRY_ATTR,
         "_driver": attr.label(
             default = "@rules_lean//lean/private:topo_compile.lean",
             allow_single_file = True,
@@ -620,6 +656,7 @@ def _lean_library_impl(ctx):
         lines.append("module\t" + rel)
         lines.append("output\t" + rel + "\t" + olean.path)
 
+    lines.append(_forbid_sorry_line(ctx))
     lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
     manifest = ctx.actions.declare_file(name + ".topo_manifest")
@@ -658,6 +695,7 @@ lean_library = rule(
             providers = [LeanInfo],
             doc = "Compiled Lean libraries this one imports. Same-top-namespace deps are staged into the compile root; disjoint ones are on LEAN_PATH. All propagate transitively in this library's LeanInfo.",
         ),
+        "forbid_sorry": _FORBID_SORRY_ATTR,
         "_driver": attr.label(
             default = "@rules_lean//lean/private:topo_compile.lean",
             allow_single_file = True,
@@ -712,6 +750,7 @@ def _lean_binary_impl(ctx):
         lines.append("stage\t" + src.path + "\t" + rel)
         lines.append("module\t" + rel)
         lines.append("output\t" + rel + "\t" + olean.path)
+    lines.append(_forbid_sorry_line(ctx))
     lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
 
     manifest = ctx.actions.declare_file(name + ".topo_manifest")
@@ -762,6 +801,7 @@ lean_binary = rule(
         "srcs": attr.label_list(allow_files = [".lean"], mandatory = True),
         "entry": attr.string(mandatory = True, doc = "Module-path of the src whose `main` is the entry point."),
         "deps": attr.label_list(providers = [LeanInfo]),
+        "forbid_sorry": _FORBID_SORRY_ATTR,
         "_driver": attr.label(
             default = "@rules_lean//lean/private:topo_compile.lean",
             allow_single_file = True,
@@ -878,4 +918,244 @@ lean_imported_library = rule(
         ),
     },
     doc = "Expose an unpacked .olean release tarball as LeanInfo (no recompile).",
+)
+
+# =============================================================================
+# lean_axiom_test: gate a theorem's TRANSITIVE axiom dependencies against an
+# allowlist.
+#
+# `#print axioms Foo` prints. It does not gate. A proof that silently acquires
+# a new axiom — a `sorry` somewhere in a lemma it depends on, a `native_decide`
+# that swaps the kernel for the compiler — keeps printing a line nobody reads,
+# and CI stays green. This rule turns that line into a build failure.
+#
+# The check runs at ELABORATION time, inside the same Lean process that just
+# compiled the proof, via `Lean.collectAxioms` — the identical API backing
+# `#print axioms`. So it agrees with the hand audit by construction rather than
+# by re-implementing it, and it is transitive: an axiom reached through any
+# depth of imported lemmas is reported at the theorem.
+#
+# Two axioms are worth naming because they are what an allowlist is FOR:
+#   * `sorryAx`           — an admitted goal. The theorem is not proved.
+#   * `Lean.ofReduceBool` — a `native_decide`. The claim rests on the compiler
+#                           and the runtime rather than on the kernel.
+# Neither is in the default allowlist, so both fail unless asked for by name.
+# =============================================================================
+
+# Lean's three standard axioms — classical logic with quotient types, which is
+# what ordinary mathematics in Lean 4 assumes. This is the default because it
+# is the allowlist essentially every "no `sorry`, no `native_decide`" audit
+# actually wants, and because writing it out is how `sorryAx` gets excluded.
+DEFAULT_LEAN_AXIOMS = [
+    "propext",
+    "Classical.choice",
+    "Quot.sound",
+]
+
+# The generated audit module's name. Fixed, not derived from the target name:
+# it is a Lean module identifier, and target names are not (`foo-bar_test` is a
+# legal label and an illegal Lean name). Each target compiles in its own work
+# dir, so two audits in one package do not collide.
+_AUDIT_MODULE = "RulesLeanAxiomAudit"
+
+def _check_lean_name(kind, name):
+    """Reject anything that would not survive being pasted into Lean source."""
+    if not name:
+        fail("lean_axiom_test: empty %s name" % kind)
+    for bad in [" ", "\t", "\n", "\"", "`", "\\", "(", ")", "[", "]", ",", "-"]:
+        if bad in name:
+            fail("lean_axiom_test: %s %r contains %r; expected a plain Lean identifier " %
+                 (kind, name, bad) + "such as `Soma.network_confluence`.")
+    return name
+
+def _render_audit_module(imports, theorems, allowed):
+    """The generated Lean file: an assertion command, then one call per theorem."""
+    lines = [
+        "/-",
+        "  GENERATED by rules_lean `lean_axiom_test`. Do not edit.",
+        "",
+        "  Each `#assert_axioms` below fails elaboration — and therefore the",
+        "  build — unless the theorem's transitive axiom dependencies are a",
+        "  subset of the allowlist.",
+        "-/",
+        "import Lean",
+    ]
+    for mod in imports:
+        lines.append("import " + mod)
+    lines += [
+        "",
+        "namespace RulesLeanAxiomAudit",
+        "",
+        "open Lean Elab Command",
+        "",
+        "/--",
+        "Fail unless every axiom `thm` transitively depends on is in `allowed`.",
+        "",
+        "`Lean.collectAxioms` is the same API `#print axioms` uses, so the two",
+        "agree by construction. Both the theorem and the allowlist are resolved",
+        "as real constants, so a typo in either is an error rather than a",
+        "silently vacuous check.",
+        "-/",
+        "elab \"#assert_axioms \" thm:ident \" within \" \"[\" allowed:ident,* \"]\" : command => do",
+        "  let thmName ← liftCoreM <| realizeGlobalConstNoOverload thm",
+        "  let mut allowedNames : Array Name := #[]",
+        "  for i in allowed.getElems do",
+        "    allowedNames := allowedNames.push (← liftCoreM <| realizeGlobalConstNoOverload i)",
+        "  let axs ← liftCoreM <| Lean.collectAxioms thmName",
+        "  let bad := axs.filter fun a => !allowedNames.contains a",
+        "  if bad.isEmpty then",
+        "    logInfo m!\"axiom audit OK   {thmName} :: {axs.toList}\"",
+        "  else",
+        "    throwError \"axiom audit FAILED for {thmName}{Format.line",
+        "      }  depends on : {axs.toList}{Format.line",
+        "      }  allowed    : {allowedNames.toList}{Format.line",
+        "      }  DISALLOWED : {bad.toList}\"",
+        "",
+        "end RulesLeanAxiomAudit",
+        "",
+    ]
+    allow_clause = "[" + ", ".join(allowed) + "]"
+    for thm in theorems:
+        lines.append("#assert_axioms {thm} within {allowed}".format(
+            thm = thm,
+            allowed = allow_clause,
+        ))
+    return "\n".join(lines) + "\n"
+
+def _lean_axiom_test_impl(ctx):
+    tc = ctx.toolchains["@rules_lean//lean:toolchain_type"].leantc
+    name = ctx.label.name
+
+    if not ctx.attr.theorems:
+        fail("lean_axiom_test: `theorems` is empty — the target would assert nothing " +
+             "and pass. Name the theorems to audit.")
+
+    theorems = [_check_lean_name("theorem", t) for t in ctx.attr.theorems]
+    allowed = [_check_lean_name("axiom", a) for a in ctx.attr.allowed_axioms]
+
+    rel_paths = []
+    consumer_tops = {}
+    src_modules = []
+    for src in ctx.files.srcs:
+        rel = _module_path(src.short_path, src.owner.package)
+        if not rel.endswith(".lean"):
+            fail("lean_axiom_test srcs must be .lean files; got %s" % rel)
+        rel_paths.append((src, rel))
+        consumer_tops[rel.split("/")[0]] = True
+        src_modules.append(rel[:-len(".lean")].replace("/", "."))
+
+    # What the generated module imports. Explicit `imports` wins; otherwise
+    # every src, which is redundant but never wrong (importing a module its own
+    # root already pulls in costs nothing) and keeps the common single-library
+    # case free of boilerplate.
+    imports = ctx.attr.imports if ctx.attr.imports else src_modules
+    imports = [_check_lean_name("import", m) for m in imports]
+    if not imports:
+        fail("lean_axiom_test: no `srcs` and no `imports` — nothing would be in " +
+             "scope for the audit. With `deps` only, name the modules to import.")
+
+    consumer_tops[_AUDIT_MODULE] = True
+
+    audit_src = ctx.actions.declare_file("{}.axiom_audit/{}.lean".format(name, _AUDIT_MODULE))
+    ctx.actions.write(
+        output = audit_src,
+        content = _render_audit_module(imports, theorems, allowed),
+    )
+
+    dep_markers, dep_files = _collect_dep_lean_info(ctx.attr.deps)
+    dep_marker_dirs = [m.path[:m.path.rfind("/")] for m in dep_markers.to_list()]
+
+    marker = ctx.actions.declare_file(name + ".axioms_ok")
+    lines = [
+        "lean\t" + tc.lean.path,
+        "work\t" + name + ".topo_work",
+        "marker\t" + marker.path,
+    ]
+    for src, rel in rel_paths:
+        lines.append("stage\t" + src.path + "\t" + rel)
+        lines.append("module\t" + rel)
+
+    # The generated module is staged at a FIXED rel path, not one derived from
+    # `_module_path`: it is a build output under `<name>.axiom_audit/`, and that
+    # directory name is a target name, which need not be a legal Lean module
+    # component.
+    lines.append("stage\t" + audit_src.path + "\t" + _AUDIT_MODULE + ".lean")
+    lines.append("module\t" + _AUDIT_MODULE + ".lean")
+    lines.append(_forbid_sorry_line(ctx))
+    lines += _dep_manifest_lines(dep_files, dep_marker_dirs, consumer_tops)
+
+    manifest = ctx.actions.declare_file(name + ".topo_manifest")
+    ctx.actions.write(output = manifest, content = "\n".join(lines) + "\n")
+    ctx.actions.run(
+        executable = tc.lean,
+        arguments = ["--run", ctx.file._driver.path, manifest.path],
+        outputs = [marker],
+        inputs = depset(
+            direct = (
+                [ctx.file._driver, manifest, tc.lean, audit_src] +
+                [s for (s, _) in rel_paths]
+            ),
+            transitive = [tc.runtime, dep_files],
+        ),
+        mnemonic = "LeanAxiomTest",
+        progress_message = "Lean axiom audit %s" % name,
+    )
+
+    runner = ctx.actions.declare_file(name + ".sh")
+    ctx.actions.write(output = runner, is_executable = True, content = "#!/bin/sh\nexit 0\n")
+    return [DefaultInfo(
+        executable = runner,
+        runfiles = ctx.runfiles(files = [marker]),
+    )]
+
+lean_axiom_test = rule(
+    implementation = _lean_axiom_test_impl,
+    test = True,
+    attrs = {
+        "srcs": attr.label_list(
+            allow_files = [".lean"],
+            doc = "Lean sources to compile before auditing. Compiled in " +
+                  "import-topological order, so list order is irrelevant (a `glob()` " +
+                  "is fine). May be empty when the theorems come from `deps`.",
+        ),
+        "deps": attr.label_list(
+            providers = [LeanInfo],
+            doc = "Compiled Lean libraries holding the theorems (e.g. a `lean_library`). " +
+                  "Name the modules to import via `imports`.",
+        ),
+        "imports": attr.string_list(
+            doc = "Lean modules the generated audit imports (e.g. `[\"Soma\"]`). " +
+                  "Defaults to every module in `srcs`, which is what a single-library " +
+                  "audit wants; required when the theorems come only from `deps`.",
+        ),
+        "theorems": attr.string_list(
+            mandatory = True,
+            doc = "Fully-qualified theorem names to audit (e.g. " +
+                  "`[\"Soma.network_confluence\"]`). Each is resolved as a real " +
+                  "constant, so a typo fails rather than passing vacuously. An empty " +
+                  "list is an error for the same reason.",
+        ),
+        "allowed_axioms": attr.string_list(
+            default = DEFAULT_LEAN_AXIOMS,
+            doc = "The allowlist. A theorem depending on anything outside it fails the " +
+                  "build, naming the theorem and the offending axioms.\n\n" +
+                  "Defaults to Lean's three standard axioms — `propext`, " +
+                  "`Classical.choice`, `Quot.sound` — which is classical logic with " +
+                  "quotient types. What that default EXCLUDES is the point: `sorryAx` " +
+                  "(an admitted goal) and `Lean.ofReduceBool` (a `native_decide`, which " +
+                  "trusts the compiler rather than the kernel).\n\n" +
+                  "Tighten it when a theorem is meant to be constructive: a proof that " +
+                  "needs only `[propext, Quot.sound]` today and silently acquires " +
+                  "`Classical.choice` tomorrow is a real change, and this is what " +
+                  "reports it. An empty list allows NOTHING.",
+        ),
+        "forbid_sorry": _FORBID_SORRY_ATTR,
+        "_driver": attr.label(
+            default = "@rules_lean//lean/private:topo_compile.lean",
+            allow_single_file = True,
+        ),
+    },
+    toolchains = ["@rules_lean//lean:toolchain_type"],
+    doc = "Fail the build unless every named theorem's transitive axiom dependencies " +
+          "are inside `allowed_axioms`.",
 )

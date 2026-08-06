@@ -26,6 +26,15 @@ at the exec root or the run step `cwd`s into the work dir.
   marker    <dest>                (0/1; sentinel file to write)
   entry     <rel>                 (0/1; after compiling, `--run` this module)
   stdout    <dest>                (0/1; with `entry`, capture its stdout here)
+  forbid_sorry <0|1>              (0/1; treat a `sorry` warning as an error)
+
+Compiler diagnostics are ALWAYS forwarded to this driver's stderr, including
+on a successful compile. They used to be forwarded only when `lean` exited
+non-zero — and `lean` exits 0 on a `sorry`, which is a warning. So an admitted
+goal produced a green build AND printed nothing: the single most important
+thing a proof-checking ruleset must not lose. `#print axioms` output went the
+same way, which is why an `Audit.lean` full of them looked like it had run and
+found nothing.
 -/
 
 private def fp (s : String) : System.FilePath := ⟨s⟩
@@ -72,12 +81,33 @@ private partial def topoLoop (mods : List String) (impsOf : String → List Stri
       topoLoop mods impsOf
         (remaining.filter fun m => !ready.contains m) (done ++ ready) (acc ++ ready)
 
+/--
+Lean's admitted-goal warning, as emitted by `Lean.addDecl`:
+
+    <file>:<line>:<col>: warning: declaration uses `sorry`
+
+The message is built as ``m!"declaration uses `{s}`"`` (tagged `hasSorry`) in
+`Lean/AddDecl.lean`, where `s` is the sorry's label — so the constant part is
+the prefix, not the whole line, and matching the prefix also catches labelled
+sorries. Byte-identical in Lean 4.29.1 and 4.32.2 (both checked in-tree).
+
+This is a substring match on compiler output, which is exactly as brittle as
+it sounds — so `//examples/axiom_audit:sorry_is_rejected` is a NEGATIVE test in
+CI. If upstream ever rewords the warning, that test goes green and the job
+fails on it, rather than this check silently degrading to a no-op.
+-/
+private def sorryWarning : String := "declaration uses "
+
+private def containsSorryWarning (s : String) : Bool :=
+  (s.splitOn "\n").any fun line => (line.splitOn sorryWarning).length > 1
+
 structure Job where
   leanBin : String := ""
   work : String := ""
   marker : String := ""
   entry : Option String := none
   stdout : Option String := none
+  forbidSorry : Bool := false
   leanPaths : List String := []
   stages : List (String × String) := []   -- (src, rel)
   modules : List String := []              -- rels to compile
@@ -92,6 +122,7 @@ private def parseManifest (content : String) : Job := Id.run do
     | ["marker", v] => j := { j with marker := v }
     | ["entry", v] => j := { j with entry := some v }
     | ["stdout", v] => j := { j with stdout := some v }
+    | ["forbid_sorry", v] => j := { j with forbidSorry := v == "1" }
     | ["leanpath", v] => j := { j with leanPaths := j.leanPaths ++ [v] }
     | ["stage", src, rel] => j := { j with stages := j.stages ++ [(src, rel)] }
     | ["module", rel] => j := { j with modules := j.modules ++ [rel] }
@@ -129,6 +160,7 @@ def main (args : List String) : IO UInt32 := do
   | .ok order =>
     let nameToRel := j.modules.map fun rel => (modName rel, rel)
     -- 3. Compile in dependency order (abs paths, so cwd is irrelevant here).
+    let mut sorries : List String := []
     for m in order do
       if let some (_, rel) := nameToRel.find? (·.1 == m) then
         let r ← IO.Process.output {
@@ -136,10 +168,27 @@ def main (args : List String) : IO UInt32 := do
           args := #["--root=" ++ work, "-o", work ++ "/" ++ oleanRel rel, work ++ "/" ++ rel]
           env := #[("LEAN_PATH", some leanPath)]
         }
+        -- ALWAYS forward diagnostics, not just on failure. `lean` exits 0 on a
+        -- `sorry` and on `#print axioms`, so discarding output on success threw
+        -- away the two things a proof build most needs to say. stderr, never
+        -- stdout: `lean_emit` captures the driver's stdout as the artifact.
+        if !r.stdout.isEmpty then IO.eprint r.stdout
+        if !r.stderr.isEmpty then IO.eprint r.stderr
         if r.exitCode != 0 then
-          IO.eprint r.stdout; IO.eprint r.stderr
           IO.eprintln s!"topo_compile: lean failed on {rel}"
           return 1
+        if containsSorryWarning r.stdout || containsSorryWarning r.stderr then
+          sorries := sorries ++ [rel]
+
+    -- Reported after the whole tree compiles, so one run names every offending
+    -- module rather than only the first.
+    if j.forbidSorry && !sorries.isEmpty then
+      IO.eprintln "topo_compile: FAILED — admitted goals (`sorry`) in:"
+      for rel in sorries do
+        IO.eprintln s!"  {rel}"
+      IO.eprintln ("topo_compile: a `sorry` is an unproved theorem that type-checks. " ++
+        "Set forbid_sorry = False on the target to allow it.")
+      return 1
 
     -- 4. Publish declared oleans.
     for (rel, dst) in j.outputs do
@@ -156,8 +205,12 @@ def main (args : List String) : IO UInt32 := do
         cwd := work
         env := #[("LEAN_PATH", some leanPath)]
       }
+      -- The entry's stderr is diagnostics, not artifact; forward it either way.
+      -- Its stdout IS the artifact for `lean_emit`, so that is only echoed on
+      -- failure (where nothing will consume it).
+      if !r.stderr.isEmpty then IO.eprint r.stderr
       if r.exitCode != 0 then
-        IO.eprint r.stdout; IO.eprint r.stderr
+        IO.eprint r.stdout
         IO.eprintln s!"topo_compile: entry {entry} failed"
         return r.exitCode
       match j.stdout with

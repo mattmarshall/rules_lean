@@ -4,7 +4,8 @@ Bazel rules for [Lean 4](https://lean-lang.org/), with native [Lake](https://git
 integration that reuses Mathlib's upstream Reservoir cache instead of forcing
 each consumer to self-host a multi-gigabyte olean tarball.
 
-- **rules**: `lean_test`, `lean_emit`, `lean_prebuilt_library`, `lean_toolchain` — see [docs/lean.md](docs/lean.md).
+- **rules**: `lean_test`, `lean_axiom_test`, `lean_emit`, `lean_library`, `lean_binary`, `lean_prebuilt_library`, `lean_toolchain` — see [docs/lean.md](docs/lean.md).
+- **proof gates** (0.7.0): a `sorry` fails the build (`forbid_sorry`, default `True`), and `lean_axiom_test` fails it when a theorem's transitive axiom dependencies leave an allowlist. See [Gating a proof](#gating-a-proof).
 - **lake integration**: `lake_workspace` repository rule + `lake` module extension — see [docs/lake.md](docs/lake.md).
 - **RulesLean Lean library** (`lean/lib/`): structured introspection of `.olean` files (`RulesLean.Olean`) and Lake workspaces (`RulesLean.Workspace`). Internal helpers under `RulesLean.Internal.*` are unstable; treat them as opt-in and expect API churn between releases. See [lean/lib/RulesLean.lean](lean/lib/RulesLean.lean) for the entry-point doc.
 - **lake_imports_manifest** target (opt-in): set `emit_imports_manifest = True` on your `lake.workspace` and `lake_workspace` builds the RulesLean library + `oleanImports` CLI and runs it over every olean in the workspace. Result lands at `@<your-lake-deps>//:lake_imports_manifest` — a TSV of `<path>\t<imported-module>` edges (~5MB / 42k edges for full mathlib), for import-graph analysis, tree-shaking, dead-code detection. **Off by default since 0.6.0**: compiling the CLI leaves a ~149MB `.lake/build/` behind (measured, darwin/arm64) in every `lake_workspace`, whether or not anything reads the manifest. The target still exists when off — it is just empty.
@@ -88,6 +89,63 @@ example : (∅ : Finset Nat).card = 0 := Finset.card_empty
 `lake update`, run `lake exe cache get` (Reservoir-cached mathlib oleans),
 and typecheck `Smoke.lean`.
 
+## Gating a proof
+
+A green `lean_test` means the code type-checks. It does **not** mean anything
+was proved: `sorry` is a warning, `lean` exits 0 on it, and until 0.7.0 that
+warning was discarded. Two rules close the gap, and neither needs Mathlib.
+
+```python
+load("@rules_lean//lean:lean.bzl", "lean_axiom_test", "lean_test")
+
+# `forbid_sorry` defaults True — an admitted goal anywhere in `srcs` is red.
+lean_test(
+    name = "proofs_test",
+    srcs = glob(["**/*.lean"]),
+    entry = "Root.lean",
+)
+
+# Every named theorem's TRANSITIVE axiom dependencies must be in the allowlist.
+lean_axiom_test(
+    name = "axioms_test",
+    srcs = glob(["**/*.lean"]),
+    theorems = [
+        "MyProject.main_theorem",
+        "MyProject.confluence",
+    ],
+    # allowed_axioms defaults to [propext, Classical.choice, Quot.sound].
+)
+```
+
+`lean_axiom_test` generates a Lean module and checks at elaboration time with
+`Lean.collectAxioms` — the same API behind `#print axioms`, so it agrees with a
+hand audit by construction. The default allowlist is Lean's three standard
+axioms; what it **excludes** is the point:
+
+| Axiom | What its presence means |
+| --- | --- |
+| `sorryAx` | An admitted goal. The theorem is not proved. |
+| `Lean.ofReduceBool` | A `native_decide` — the claim rests on the compiler and runtime, not the kernel. |
+
+Tightening the allowlist is the interesting direction. A theorem that needs
+only `[propext, Quot.sound]` today and quietly picks up `Classical.choice`
+tomorrow has changed, and `allowed_axioms = ["propext", "Quot.sound"]` is what
+reports it.
+
+Auditing a compiled dep instead of sources — name the modules to import:
+
+```python
+lean_axiom_test(
+    name = "axioms_test",
+    deps = [":my_library"],
+    imports = ["MyProject"],
+    theorems = ["MyProject.main_theorem"],
+)
+```
+
+See [`examples/axiom_audit`](examples/axiom_audit) for both, with the negative
+tests that prove each gate actually fires.
+
 ## How it works
 
 `lake_workspace` is a Bazel repository rule that:
@@ -128,7 +186,8 @@ but unavoidable for custom deps.
 ## Compatibility
 
 - **Bazel**: 7.4+, bzlmod required.
-- **Lean**: 4.29+ tested. Other versions: add the platform sha256 to
+- **Lean**: 4.29.1 and 4.32.2 exercised; `lean_axiom_test` and the `sorry`
+  gate are verified on both. Other versions: add the platform sha256 to
   [`lean/private/known_lean_versions.bzl`](lean/private/known_lean_versions.bzl)
   (compute with `curl -fsSL <url> | shasum -a 256`).
 - **Platforms**: darwin_aarch64, darwin_x86_64, linux_x86_64, linux_aarch64.

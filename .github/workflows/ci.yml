@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel in-flight runs for the same ref. Added with the axiom_audit job, which
+# takes the matrix from 5 jobs to 7 — without this a merge burst stacks whole
+# runs and each one downloads a Lean toolchain.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Fast PR gate: rule-graph loads, stardoc-generated reference docs match
   # the .bzl docstrings (diff_test), build is green on both Linux and macOS.
@@ -74,6 +81,52 @@ jobs:
           # consumed by a target rooted at `App/`. Lean does not fall through
           # LEAN_PATH roots, so this fails unless the shared namespace is staged.
           bazel test //examples/shared_namespace/... --test_output=errors
+
+  # The proof gates, and — the part that matters — their FAILURE paths.
+  #
+  # A gate is worth exactly what its negative test is worth. `forbid_sorry` and
+  # `lean_axiom_test` both exist to turn a passing build red, so a job that only
+  # ran the passing targets would be satisfied by a rule that does nothing at
+  # all. The three `*_is_rejected` targets are `manual`-tagged (they cannot be
+  # in `bazel test //...`; they are meant to be red) and are run here with the
+  # exit code asserted NON-zero.
+  #
+  # Both platforms: the sorry gate matches the compiler's warning text, and a
+  # reworded or re-localized message would make it silently vacuous. If that
+  # ever happens, `sorry_is_rejected` goes green and this job fails on it —
+  # which is the whole reason the negatives are in CI rather than in a comment.
+  axiom_audit:
+    name: proof gates + failure paths (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bazel-contrib/setup-bazel@0.10.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-axioms-${{ matrix.os }}
+          repository-cache: true
+      - name: positive — the gates pass on honest proofs
+        run: bazel test //examples/axiom_audit:all --test_output=errors
+      - name: negative — each gate must FAIL
+        run: |
+          # `bazel test` on an expected-red target: `-e` would abort the step on
+          # the very exit code being tested, so capture it with `|| rc=$?`.
+          for t in tightened_allowlist_is_rejected \
+                   admitted_is_rejected \
+                   sorry_is_rejected; do
+            rc=0
+            bazel test "//examples/axiom_audit:$t" --test_output=errors || rc=$?
+            if [ "$rc" -eq 0 ]; then
+              echo "::error::$t PASSED — the gate did not fire. It is inert."
+              exit 1
+            fi
+            echo "ok: $t failed as required (exit $rc)"
+          done
 
   # End-to-end smoke: actually runs `lake_workspace` against a Batteries-only
   # Lake workspace (no Mathlib → no multi-GB Reservoir cache download), then

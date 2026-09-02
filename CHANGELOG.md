@@ -62,6 +62,8 @@ The default allowlist is Lean's three standard axioms. What it excludes is the
 point: `sorryAx` and `Lean.ofReduceBool`. Tightening it is the interesting
 direction — a theorem that needs only `[propext, Quot.sound]` today and picks
 up `Classical.choice` tomorrow is a real change, and this reports it.
+Successful audits are silent; failed audits name the theorem, its axiom
+dependencies, the allowlist, and the disallowed axioms.
 
 Verified by mutation on soma's actual proofs, not by assumption. soma's
 `Audit.lean` names eight theorems; with the three-axiom allowlist all eight
